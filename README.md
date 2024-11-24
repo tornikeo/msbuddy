@@ -139,3 +139,19 @@ This work is licensed under the Apache License 2.0.
 
 ## Contact
 Please contact the msbuddy developer & maintainer Shipei Xing via **s1xing@health.ucsd.edu** or **philipxsp@hotmail.com**.
+
+
+```py
+inputs: spectrum (2, n), dataset (d, 12), pmz float, tolerance float 
+outputs: candidate_formula (c, 12) 
+
+candidate_formula = []
+for mz, intensity in spectrum:
+  nlmz = pmz - mz
+  fforms = database(mz, tolerance)
+  nlforms = database(nlmz, tolerance)
+  for fform, nlform in product(fforms, nlforms):
+    form = fform + nlform
+    if is_valid_formula(form) and is_mass_close(form, pmz, tolerance):
+      candidate_formula.append(fform)
+```

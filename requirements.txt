@@ -22,3 +22,5 @@ chemparse>=0.1.2
 
 # For JIT compilation
 numba>=0.57.0
+
+pytest-benchmark

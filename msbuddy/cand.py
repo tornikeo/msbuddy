@@ -14,6 +14,7 @@ Description: generate candidate formula space for a metabolic feature; mass sear
 """
 
 from typing import Union, List, Tuple
+import torch
 
 import numpy as np
 from brainpy import isotopic_variants
@@ -24,6 +25,7 @@ from msbuddy.ml import _calc_log_p_norm
 from msbuddy.query import check_common_frag, check_common_nl, query_precursor_mass, query_fragnl_mass
 from msbuddy.utils import form_arr_to_str, enumerate_subformula, read_formula, SubformulaResult, FormulaResult
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class FragExplanation:
     """
@@ -501,7 +503,7 @@ def _gen_candidate_formula_from_ms2(mf: MetaFeature, ppm: bool, ms1_tol: float, 
 
         # query mass in formula database
         frag_form_list, nl_form_list = _query_frag_nl_pair(frag_mz, nl_mz, mf.adduct.pos_mode, na_bool, k_bool,
-                                                           ms2_tol, ppm, db_mode, gd)
+                                                           ms1_tol, ms2_tol, ppm, db_mode, gd)
         if frag_form_list is None or nl_form_list is None:
             continue
 
@@ -512,6 +514,8 @@ def _gen_candidate_formula_from_ms2(mf: MetaFeature, ppm: bool, ms1_tol: float, 
         # iterate fragment formula list and neutral loss formula list
         for frag in frag_form_list:
             for nl in nl_form_list:
+                ms2_abs_tol = ms2_tol if not ppm else ms2_tol * frag.mass * 1e-6
+
                 # DBE check, sum of DBE should be a non-integer
                 if (frag.dbe + nl.dbe) % 1 == 0 or (frag.dbe + nl.dbe) < 0 or frag.dbe < 0:
                     continue
@@ -555,7 +559,7 @@ def _gen_candidate_formula_from_ms2(mf: MetaFeature, ppm: bool, ms1_tol: float, 
 
 
 def _query_frag_nl_pair(frag_mz: float, nl_mz: float, pos_mode: bool, na_bool: bool, k_bool: bool,
-                        ms2_tol: float, ppm: bool,
+                        ms1_tol:float, ms2_tol: float, ppm: bool,
                         db_mode: int, gd) -> Tuple[Union[List[Formula], None], Union[List[Formula], None]]:
     """
     query fragment and neutral loss formulas from database
@@ -570,10 +574,12 @@ def _query_frag_nl_pair(frag_mz: float, nl_mz: float, pos_mode: bool, na_bool: b
     :param gd: global dictionary
     :return: fragment formula list, neutral loss formula list
     """
+    nl_tol = (ms2_tol**2 + ms1_tol**2)**.5
+
     if nl_mz < frag_mz:
         # search neutral loss first, for faster search
         nl_form_list = query_fragnl_mass(nl_mz, False, pos_mode, na_bool, k_bool,
-                                         ms2_tol, ppm, db_mode, gd)
+                                         nl_tol, ppm, db_mode, gd)
         if nl_form_list:
             frag_form_list = query_fragnl_mass(frag_mz, True, pos_mode,
                                                na_bool, k_bool, ms2_tol, ppm, db_mode, gd)
@@ -584,7 +590,7 @@ def _query_frag_nl_pair(frag_mz: float, nl_mz: float, pos_mode: bool, na_bool: b
                                            ms2_tol, ppm, db_mode, gd)
         if frag_form_list:
             nl_form_list = query_fragnl_mass(nl_mz, False, pos_mode, na_bool, k_bool,
-                                             ms2_tol, ppm, db_mode, gd)
+                                             nl_tol, ppm, db_mode, gd)
         else:
             return None, None
 
@@ -729,6 +735,64 @@ def _form_array_equal(arr1: np.array, arr2: np.array) -> bool:
     """
     return True if np.equal(arr1, arr2).all() else False
 
+@torch.no_grad()
+def get_mass_arr(arr: np.ndarray, adduct_charge = 1, cutoff=0, pre_charged_arr: np.array = None) -> np.ndarray:
+    dims = [torch.arange(0, e+1, dtype=torch.float16, device=device) for e in arr] # fp32, because everything is optimized for that
+    pre_charged_arr = torch.from_numpy(pre_charged_arr).half().to(device)
+    subform_arr = torch.cartesian_prod(*dims)
+    ele_mass_arr = torch.tensor([
+        12.000000, 1.007825, 78.918336, 34.968853, 18.998403, 126.904473, 38.963707, 14.003074,
+        22.989769, 15.994915, 30.973762, 31.972071
+    ], dtype=torch.float32, device=device)
+    electron_mass = 0.0005486
+
+    ## SUBFORM FILTER
+    # Weights encodes the DBE weights for each element in formula, [C] - 1/2 ([H] + ...) - 1/2 ([N] + [P])
+    # remember the alphabet is ["C", "H", "Br", "Cl", "F", "I", "K", "N", "Na", "O", "P", "S"]
+    weights = torch.tensor([1, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5, -0.5, 0, 0.5, 0], 
+                           dtype=torch.float16, device=device)
+    dbe_filter = (subform_arr @ weights + 1) >= cutoff # Add 1 as per the formula
+    # subform_arr = subform_arr[dbe_filter, :]
+
+    ## SENIOR FILTER
+    # Define weights for the senior_1_1_arr calculation
+    weights_senior_1_1 = torch.tensor(
+        [4, 1, 1, 1, 1, 1, 1, 3, 1, 2, 5, 6], dtype=torch.float16, device=device
+    )
+    senior_1_1_tensor = subform_arr @ weights_senior_1_1
+    frag_atom_sum = subform_arr.sum(dim=1)
+    senior_filter = senior_1_1_tensor >= (2 * (frag_atom_sum - 1))
+
+    ## Pre charge array
+    # Check whether a subformula (frag and loss) is valid. e.g., 'C2', 'N4', 'P2'; O >= 2*P
+    # frag_atom_sum = subform_arr, axis=1)
+    loss_form_arr = pre_charged_arr - subform_arr
+    loss_atom_sum = loss_form_arr.sum(dim=1)
+    
+    invalid_bool_arr = (frag_atom_sum == subform_arr[:, 0]) | (frag_atom_sum == subform_arr[:, 7]) | \
+                       (frag_atom_sum == subform_arr[:, 10]) | (loss_atom_sum == loss_form_arr[:, 0]) | \
+                       (loss_atom_sum == loss_form_arr[:, 7]) | (loss_atom_sum == loss_form_arr[:, 10])
+    
+    # O >= 2*P if P > 0
+    invalid_o_p_frag_bool_arr = (subform_arr[:, 9] < 2 * subform_arr[:, 10]) & (subform_arr[:, 10] > 0)
+    invalid_o_p_loss_bool_arr = (loss_form_arr[:, 9] < 2 * loss_form_arr[:, 10]) & (loss_form_arr[:, 10] > 0)
+
+    invalid_filter = ~(invalid_bool_arr | invalid_o_p_frag_bool_arr | invalid_o_p_loss_bool_arr)
+
+    ## Apply filter
+    subform_arr = subform_arr[invalid_filter & senior_filter & dbe_filter, :]
+
+    # Get mass
+    subform_arr = subform_arr.float()
+
+    mass_arr = subform_arr @ ele_mass_arr
+    mass_arr -= adduct_charge * electron_mass
+
+    six = mass_arr.argsort()
+    mass_arr = mass_arr[six]
+    subform_arr = subform_arr[six]
+    
+    return subform_arr.cpu().numpy(), mass_arr.cpu().numpy()
 
 def assign_subformula_cand_form(mf: MetaFeature, ppm: bool, ms2_tol: float) -> MetaFeature:
     """
@@ -738,20 +802,26 @@ def assign_subformula_cand_form(mf: MetaFeature, ppm: bool, ms2_tol: float) -> M
     :param ms2_tol: mz tolerance for fragment ions / neutral losses
     :return: MetaFeature object
     """
-
     for k, cf in enumerate(mf.candidate_formula_list):
         # enumerate all subformulas
-        subform_arr = enumerate_subformula(cf.charged_formula.array)
+        # subform_arr = enumerate_subformula(cf.charged_formula.array)
 
         # mono mass
-        mass_arr = _calc_subform_mass(subform_arr, mf.adduct.charge)
+        # mass_arr = _calc_subform_mass(subform_arr, mf.adduct.charge)
+        subform_arr, mass_arr = get_mass_arr(cf.charged_formula.array, 
+                                             adduct_charge=mf.adduct.charge, 
+                                             cutoff=0, 
+                                             pre_charged_arr=cf.charged_formula.array)
+
         # assign ms2 explanation
-        mf.candidate_formula_list[k] = _assign_ms2_explanation(mf, cf, cf.charged_formula.array, subform_arr, mass_arr,
+        mf.candidate_formula_list[k] = _assign_ms2_explanation(mf, cf, cf.charged_formula.array, 
+                                                               subform_arr, 
+                                                               mass_arr,
                                                                ppm, ms2_tol)
 
     return mf
 
-
+# This shit is slow...
 @njit
 def _calc_subform_mass(subform_arr: np.array, adduct_charge: int) -> np.array:
     """
@@ -852,18 +922,18 @@ def _assign_ms2_explanation(mf: MetaFeature, cf: CandidateFormula, pre_charged_a
         this_mass = mass_arr[idx_list]
 
         # dbe filter (DBE >= 0)
-        bool_arr_1 = _dbe_subform_filter(this_subform_arr, 0)
+        # bool_arr_1 = _dbe_subform_filter(this_subform_arr, 0)
 
         # SENIOR rules filter, a soft version
-        bool_arr_2 = _senior_subform_filter(this_subform_arr)
+        # bool_arr_2 = _senior_subform_filter(this_subform_arr)
 
         # valid subformula check
-        bool_arr_3 = _valid_subform_check(this_subform_arr, pre_charged_arr)
+        # bool_arr_3 = _valid_subform_check(this_subform_arr, pre_charged_arr)
 
         # combine filters
-        bool_arr = bool_arr_1 & bool_arr_2 & bool_arr_3
-        this_subform_arr = this_subform_arr[bool_arr, :]
-        this_mass = this_mass[bool_arr]
+        # bool_arr = bool_arr_1 & bool_arr_2 & bool_arr_3
+        # this_subform_arr = this_subform_arr[bool_arr, :]
+        # this_mass = this_mass[bool_arr]
 
         # if no valid subformula, skip
         if this_subform_arr.shape[0] == 0:
