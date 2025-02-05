@@ -32,7 +32,7 @@ To perform formula annotation, you also have to install the [lightgbm](https://g
 pip install lightgbm
 ```
 ``
-Note: Python 3.9 or later is required.
+Note: Python version >= 3.9 and <3.13 is required.
 ``
 
 ## Python usage 
@@ -138,4 +138,4 @@ msbuddy --help
 This work is licensed under the Apache License 2.0.
 
 ## Contact
-Please contact the msbuddy developer & maintainer Shipei Xing via **s1xing@health.ucsd.edu** or **philipxsp@hotmail.com**.
+Please contact me via **philipxsp@hotmail.com**.

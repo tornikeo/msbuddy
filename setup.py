@@ -5,9 +5,9 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="msbuddy",
-    version="0.3.8",
+    version="0.3.10",
     author="Shipei Xing",
-    author_email="s1xing@health.ucsd.edu",
+    author_email="philipxsp@hotmail.com",
     description="Molecular formula annotation for MS-based small molecule analysis.",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -24,7 +24,7 @@ setuptools.setup(
     },
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: Apache 2.0 License",
+        "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
     ],
     packages=["msbuddy"],
@@ -40,5 +40,5 @@ setuptools.setup(
         "tqdm",
         "pandas"
     ],
-    python_requires=">=3.9"
+    python_requires=">=3.8"
 )
