@@ -27,9 +27,15 @@ We assume the standard settings the task of annotating chemical formulae given r
 
 The task of MSBUDDY is mix the chemical formulae from the given dataset, so we can explain the most peaks in the spectrum and thus find the most likely formula that explanats for the given PMZ, with the given measurement tolerance. 
 
-### The MSBUDDY Algorithm 
+### The MSBUDDY Algorithm
 
-The algorithm contains two distinct parts, the first starts with spectra mz values and comes up with candidate formulae (CFs) for PMZ, and the second filters and orders the CFs by the amount and significance of peaks explained. There’s a third part, which additionally statistically predicts false-detection-rate (FDR) for the selected top CF, using AI. 
+The algorithm contains two distinct parts:
+
+The first starts with mz values and comes up with candidate formulae (CFs) for the precursor. This is a large list of candidate chemical formulae.
+
+Given that each peak has a list candidate formulae attached to it, a task is to find one the candidate for precursor that maximizes the number of "explained" peaks.  
+
+The second step filters and orders the candidates by  amount and significance of peaks explained. There’s a third part, which additionally statistically predicts false-detection-rate (FDR) for the selected top CF, using AI. 
 
 #### Step 1: From spectra to candidate formulae 
 
